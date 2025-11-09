@@ -9,6 +9,7 @@ from typing import Sequence
 
 from . import __version__
 from .data import DatasetConfig
+from .generation import GenerationConfig, generate_images
 from .modal import ModalConfig, StorageConfig, launch_modal_training
 from .training import (
     DiffusersTrainingConfig,
@@ -246,7 +247,116 @@ def build_parser() -> argparse.ArgumentParser:
 
     train_parser.set_defaults(func=_dispatch_training)
 
+    generate_parser = subparsers.add_parser(
+        "generate",
+        help="Generate images from text prompts using a diffusion pipeline.",
+    )
+    generate_parser.add_argument(
+        "prompts",
+        nargs="*",
+        help="Prompts provided directly via the command line.",
+    )
+    generate_parser.add_argument(
+        "--prompts-file",
+        type=Path,
+        default=None,
+        help="Optional path to a text file with one prompt per line.",
+    )
+    generate_parser.add_argument("--base-model", required=True, help="Identifier of the base diffusers model to load.")
+    generate_parser.add_argument("--model-revision", default=None, help="Optional model revision to pull from the hub.")
+    generate_parser.add_argument("--model-variant", default=None, help="Optional model variant for specialized checkpoints.")
+    generate_parser.add_argument("--hf-token", default=None, help="Authentication token for private models on Hugging Face.")
+    generate_parser.add_argument("--output-dir", required=True, type=Path, help="Directory where generated images will be stored.")
+    generate_parser.add_argument("--width", type=int, default=512, help="Width of the generated images.")
+    generate_parser.add_argument("--height", type=int, default=512, help="Height of the generated images.")
+    generate_parser.add_argument("--guidance-scale", type=float, default=7.5, help="Classifier-free guidance scale.")
+    generate_parser.add_argument("--num-steps", type=int, default=30, help="Number of inference steps.")
+    generate_parser.add_argument("--scheduler", default=None, help="Scheduler to use (ddim, dpm_solver, euler, euler_a, heun, lms, pndm).")
+    generate_parser.add_argument("--seed", type=int, default=None, help="Seed used to initialise the random number generator.")
+    generate_parser.add_argument("--images-per-prompt", type=int, default=1, help="Number of images to generate for each prompt.")
+    generate_parser.add_argument("--negative-prompt", default=None, help="Negative prompt applied during sampling.")
+    generate_parser.add_argument(
+        "--mixed-precision",
+        choices=["no", "fp16", "bf16"],
+        default="fp16",
+        help="Precision strategy for the inference pipeline.",
+    )
+    generate_parser.add_argument(
+        "--lora-weights",
+        type=Path,
+        default=None,
+        help="Path to LoRA weights to load into the pipeline.",
+    )
+    generate_parser.add_argument(
+        "--disable-xformers",
+        action="store_true",
+        help="Disable xFormers memory optimisations if available.",
+    )
+    generate_parser.add_argument(
+        "--no-attention-slicing",
+        action="store_true",
+        help="Disable attention slicing to trade memory for speed.",
+    )
+    generate_parser.add_argument(
+        "--enable-safety-checker",
+        action="store_true",
+        help="Keep the safety checker active if the pipeline provides one.",
+    )
+    generate_parser.add_argument(
+        "--device",
+        default=None,
+        help="Explicit device for inference (e.g. cuda, cuda:0, cpu).",
+    )
+    generate_parser.set_defaults(func=_dispatch_generation)
+
     return parser
+
+
+def _load_prompts(args: argparse.Namespace) -> list[str]:
+    prompts: list[str] = []
+    prompts.extend(args.prompts or [])
+    if args.prompts_file:
+        file_path = Path(args.prompts_file)
+        if not file_path.exists():
+            raise FileNotFoundError(f"Prompts file not found: {file_path}")
+        with file_path.open("r", encoding="utf8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line:
+                    prompts.append(line)
+    return prompts
+
+
+def _dispatch_generation(args: argparse.Namespace) -> None:
+    prompts = _load_prompts(args)
+    if not prompts:
+        raise SystemExit("No prompts were provided for generation.")
+
+    config = GenerationConfig(
+        base_model=args.base_model,
+        output_dir=Path(args.output_dir),
+        revision=args.model_revision,
+        variant=args.model_variant,
+        token=args.hf_token,
+        width=args.width,
+        height=args.height,
+        guidance_scale=args.guidance_scale,
+        num_inference_steps=args.num_steps,
+        scheduler=args.scheduler,
+        seed=args.seed,
+        images_per_prompt=args.images_per_prompt,
+        negative_prompt=args.negative_prompt,
+        mixed_precision=None if args.mixed_precision == "no" else args.mixed_precision,
+        lora_weights=args.lora_weights.expanduser().resolve() if args.lora_weights else None,
+        enable_xformers=not args.disable_xformers,
+        attention_slicing=not args.no_attention_slicing,
+        disable_safety_checker=not args.enable_safety_checker,
+        device=args.device,
+    )
+
+    saved = generate_images(prompts, config)
+    for path in saved:
+        logger.info("Generated image saved at %s", path)
 
 
 def cli(argv: Sequence[str] | None = None) -> None:
